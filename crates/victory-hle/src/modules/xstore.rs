@@ -175,6 +175,48 @@ pub struct GameLicense {
     pub expiration: i64,
 }
 
+impl GameLicense {
+    /// The native result layout, including initialized bytes in its padding.
+    /// A typed struct copy does not preserve initialized padding, so copying
+    /// its whole object representation through `xasync::bytes` is not valid.
+    fn result_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0; size_of::<Self>()];
+        let mut put = |at: usize, field: &[u8]| {
+            bytes[at..at + field.len()].copy_from_slice(field);
+        };
+        put(std::mem::offset_of!(Self, sku_store_id), &self.sku_store_id);
+        put(
+            std::mem::offset_of!(Self, is_active),
+            &[u8::from(self.is_active)],
+        );
+        put(
+            std::mem::offset_of!(Self, is_trial_owned_by_this_user),
+            &[u8::from(self.is_trial_owned_by_this_user)],
+        );
+        put(
+            std::mem::offset_of!(Self, is_disc_license),
+            &[u8::from(self.is_disc_license)],
+        );
+        put(
+            std::mem::offset_of!(Self, is_trial),
+            &[u8::from(self.is_trial)],
+        );
+        put(
+            std::mem::offset_of!(Self, trial_seconds_remaining),
+            &self.trial_seconds_remaining.to_ne_bytes(),
+        );
+        put(
+            std::mem::offset_of!(Self, trial_unique_id),
+            &self.trial_unique_id,
+        );
+        put(
+            std::mem::offset_of!(Self, expiration),
+            &self.expiration.to_ne_bytes(),
+        );
+        bytes
+    }
+}
+
 /// A full, active licence for the game's SKU (`<store id>/0010`, the
 /// store's first SKU), not a trial, without expiry.
 fn game_license() -> GameLicense {
@@ -195,7 +237,7 @@ fn game_license() -> GameLicense {
 }
 
 extern "system" fn game_license_async(_: This, _: Handle, block: *mut AsyncBlock) -> HRESULT {
-    let license = xasync::bytes(game_license());
+    let license = game_license().result_bytes();
     xasync::finished_with(block, (&raw const GAME_LICENSE).cast(), Ok(license))
 }
 extern "system" fn game_license_result(
@@ -423,6 +465,52 @@ mod tests {
             callback: None,
             internal: [0; 4],
         }
+    }
+
+    #[test]
+    fn game_license_result_initializes_its_entire_native_layout() {
+        assert_eq!(size_of::<GameLicense>(), 104);
+        let license = GameLicense {
+            sku_store_id: [0x3A; 18],
+            is_active: true,
+            is_trial_owned_by_this_user: false,
+            is_disc_license: true,
+            is_trial: false,
+            trial_seconds_remaining: 0x1122_3344,
+            trial_unique_id: std::array::from_fn(|i| i as u8 + 7),
+            expiration: -123_456_789,
+        };
+        let bytes = license.result_bytes();
+        // Pin the native ABI independently of result_bytes' offset_of calls.
+        let mut expected = [0u8; 104];
+        expected[..18].fill(0x3A);
+        expected[18..22].copy_from_slice(&[1, 0, 1, 0]);
+        expected[24..28].copy_from_slice(&0x1122_3344u32.to_ne_bytes());
+        expected[28..92].copy_from_slice(&license.trial_unique_id);
+        expected[96..104].copy_from_slice(&(-123_456_789i64).to_ne_bytes());
+        assert_eq!(bytes, expected);
+        assert_eq!(&bytes[22..24], &[0, 0]);
+        assert_eq!(&bytes[92..96], &[0, 0, 0, 0]);
+
+        // SAFETY: the encoded buffer holds every field of the 104-byte ABI,
+        // including valid 0/1 booleans; read_unaligned needs no Vec alignment.
+        let decoded = unsafe { bytes.as_ptr().cast::<GameLicense>().read_unaligned() };
+        assert_eq!(decoded.sku_store_id, license.sku_store_id);
+        assert_eq!(
+            (
+                decoded.is_active,
+                decoded.is_trial_owned_by_this_user,
+                decoded.is_disc_license,
+                decoded.is_trial
+            ),
+            (true, false, true, false)
+        );
+        assert_eq!(
+            decoded.trial_seconds_remaining,
+            license.trial_seconds_remaining
+        );
+        assert_eq!(decoded.trial_unique_id, license.trial_unique_id);
+        assert_eq!(decoded.expiration, license.expiration);
     }
 
     #[test]

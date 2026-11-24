@@ -820,9 +820,50 @@ pub fn result<T>(block: *mut AsyncBlock, identity: *const c_void, out: *mut T) -
     )
 }
 
-/// The bytes of a value, for [`finished_with`].
-pub fn bytes<T: Copy>(value: T) -> Vec<u8> {
-    // SAFETY: a `Copy` value is plain data; padding bytes are never read.
+/// Values whose entire object representation can be copied as initialized bytes.
+///
+/// # Safety
+/// Every byte of every valid value must be initialized. In particular, the
+/// type must not contain implicit or trailing padding: moving a value does
+/// not preserve initialization of padding, even if a constructor zeroes it.
+pub unsafe trait NoUninit: Copy {}
+
+macro_rules! no_uninit_scalars {
+    ($($ty:ty),* $(,)?) => { $(
+        // SAFETY: a valid primitive scalar has a fully initialized representation
+        // without padding. Invalid bit patterns need not be accepted here.
+        unsafe impl NoUninit for $ty {}
+    )* };
+}
+
+no_uninit_scalars!(
+    bool, char, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
+);
+
+// SAFETY: thin raw pointers have a fully initialized representation without padding.
+unsafe impl<T> NoUninit for *const T {}
+// SAFETY: thin raw pointers have a fully initialized representation without padding.
+unsafe impl<T> NoUninit for *mut T {}
+
+/// The initialized bytes of a value, for [`finished_with`].
+///
+/// ```
+/// use victory_hle::modules::xasync::bytes;
+/// assert_eq!(bytes(0x1234u16), 0x1234u16.to_ne_bytes());
+/// ```
+///
+/// `Copy` alone does not make a struct's padding safe to read:
+///
+/// ```compile_fail
+/// use victory_hle::modules::xasync::bytes;
+/// #[repr(C)]
+/// #[derive(Clone, Copy)]
+/// struct Padded { tag: u8, value: u64 }
+/// let _ = bytes(Padded { tag: 1, value: 2 });
+/// ```
+pub fn bytes<T: NoUninit>(value: T) -> Vec<u8> {
+    // SAFETY: NoUninit guarantees every representation byte is initialized,
+    // and our owned value stays alive throughout the copy. u8 needs alignment 1.
     unsafe { std::slice::from_raw_parts((&raw const value).cast::<u8>(), size_of::<T>()) }.to_vec()
 }
 
